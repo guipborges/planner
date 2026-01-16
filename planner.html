@@ -1,0 +1,1208 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daily Planner System v2</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <style>
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        .fade-in { animation: fadeIn 0.2s ease-out; }
+        .chart-container { position: relative; height: 300px; }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        /* Drag & Drop Visuals */
+        .drag-over { background-color: #eff6ff !important; border-color: #3b82f6 !important; }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans">
+    <!-- Authentication controls will render login/logout buttons -->
+    <div id="auth-controls" class="flex justify-end p-2 space-x-2"></div>
+    <div id="app"></div>
+
+    <script>
+        // ==========================================
+        // 1. CONSTANTS & CONFIG
+        // ==========================================
+        const CONSTANTS = {
+            DB_NAME: 'DailyPlannerDB',
+            DB_VERSION: 3,
+            VIEWS: {
+                DASHBOARD: 'dashboard',
+                TASKS: 'tasks',
+                CALENDAR: 'calendar',
+                GOALS: 'goals',
+                TRASH: 'goals-trash',
+                JOURNAL: 'journal',
+                REPORTS: 'reports'
+            },
+            TASK_COLUMNS: [
+                { id: 'todo', name: 'To Do', color: 'bg-gray-100', border: 'border-gray-200' },
+                { id: 'in-progress', name: 'In Progress', color: 'bg-blue-50', border: 'border-blue-200' },
+                { id: 'done', name: 'Done', color: 'bg-green-50', border: 'border-green-200' }
+            ],
+            PRIORITY: {
+                high: { label: 'High', color: 'text-red-700 bg-red-100 border-red-200' },
+                medium: { label: 'Medium', color: 'text-amber-700 bg-amber-100 border-amber-200' },
+                low: { label: 'Low', color: 'text-blue-700 bg-blue-100 border-blue-200' }
+            }
+        };
+
+        // ==========================================
+        // 2. STATE (Single Source of Truth)
+        // ==========================================
+        const State = {
+            currentView: CONSTANTS.VIEWS.DASHBOARD,
+            isRendering: false,
+            // Data Caches
+            tasks: [],
+            goals: [],
+            journal: [],
+            // Authenticated user (null when not logged in)
+            user: null,
+            // UI State
+            errorMessage: null,
+            activeChart: null
+        };
+
+        // ==========================================
+        // 3. STORAGE (Persistence Layer)
+        // ==========================================
+        const Storage = {
+            db: null,
+
+            async init() {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(CONSTANTS.DB_NAME, CONSTANTS.DB_VERSION);
+                    
+                    request.onerror = () => reject(request.error);
+                    request.onsuccess = () => {
+                        this.db = request.result;
+                        resolve();
+                    };
+                    
+                    request.onupgradeneeded = (event) => {
+                        const db = event.target.result;
+                        ['goals', 'tasks', 'journal'].forEach(store => {
+                            if (!db.objectStoreNames.contains(store)) {
+                                db.createObjectStore(store, { keyPath: 'id' });
+                            }
+                        });
+                    };
+                });
+            },
+
+            async _tx(storeName, mode, callback) {
+                const tx = this.db.transaction(storeName, mode);
+                const store = tx.objectStore(storeName);
+                return new Promise((resolve, reject) => {
+                    const request = callback(store);
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+
+            async getAll(store) { return this._tx(store, 'readonly', s => s.getAll()); },
+            async add(store, item) { return this._tx(store, 'readwrite', s => s.add(item)); },
+            async update(store, item) { return this._tx(store, 'readwrite', s => s.put(item)); },
+            async delete(store, id) { return this._tx(store, 'readwrite', s => s.delete(id)); },
+            async clear(store) { return this._tx(store, 'readwrite', s => s.clear()); }
+        };
+
+        // ==========================================
+        // 4. UI (Pure Rendering)
+        // ==========================================
+        const UI = {
+            render() {
+                const navItem = (view, label, icon) => `
+                    <button onclick="Actions.switchView('${view}')" 
+                        class="w-full text-left px-4 py-3 rounded-lg transition mb-1 flex items-center gap-3 ${
+                        State.currentView === view ? 'bg-blue-600 text-white shadow-md' : 'text-gray-300 hover:bg-gray-800 hover:text-white'
+                    }">
+                        <span class="text-xl">${icon}</span>
+                        <span class="font-medium">${label}</span>
+                    </button>
+                `;
+
+                return `
+                    <div class="flex h-screen overflow-hidden font-sans">
+                        <aside class="w-64 bg-gray-900 text-white p-6 flex flex-col shadow-xl z-20">
+                            <h1 class="text-2xl font-bold mb-8 tracking-tight flex items-center gap-2">
+                                <span class="text-blue-500">◆</span> Planner Pro
+                            </h1>
+                            <nav class="flex-1 overflow-y-auto space-y-1">
+                                ${navItem('dashboard', 'Dashboard', '📊')}
+                                ${navItem('tasks', 'Task Board', '📋')}
+                                ${navItem('calendar', 'Calendar', '📅')}
+                                ${navItem('goals', 'Goals', '🎯')}
+                                ${navItem('journal', 'Journal', '📔')}
+                                ${navItem('reports', 'Reports', '📈')}
+                            </nav>
+                            <div class="pt-6 border-t border-gray-700 space-y-2 mt-2">
+                                ${navItem('goals-trash', 'Trash', '🗑️')}
+                                <div class="grid grid-cols-2 gap-2 mt-4">
+                                    <button onclick="Actions.exportData()" class="bg-gray-800 hover:bg-gray-700 py-2 rounded text-xs border border-gray-700 transition">Export</button>
+                                    <button onclick="document.getElementById('import-file').click()" class="bg-gray-800 hover:bg-gray-700 py-2 rounded text-xs border border-gray-700 transition">Import</button>
+                                </div>
+                                <input type="file" id="import-file" accept=".json" class="hidden" onchange="Actions.importData(event)">
+                            </div>
+                        </aside>
+                        
+                        <main class="flex-1 flex flex-col bg-gray-50 relative overflow-hidden">
+                            ${State.errorMessage ? `
+                                <div class="absolute top-4 left-1/2 transform -translate-x-1/2 bg-red-500 text-white px-6 py-3 rounded-full shadow-lg z-50 animate-bounce font-medium text-sm flex items-center gap-2">
+                                    ⚠️ ${State.errorMessage}
+                                    <button onclick="Actions.clearError()" class="ml-2 hover:bg-red-600 rounded-full w-5 h-5 flex items-center justify-center">×</button>
+                                </div>
+                            ` : ''}
+                            <div id="main-content" class="flex-1 overflow-auto p-8">
+                                ${this.renderCurrentView()}
+                            </div>
+                        </main>
+                    </div>
+                `;
+            },
+
+            renderCurrentView() {
+                try {
+                    switch (State.currentView) {
+                        case 'dashboard': return this.renderDashboard();
+                        case 'tasks': return this.renderTaskBoard();
+                        case 'calendar': return this.renderCalendar();
+                        case 'goals': return this.renderGoals();
+                        case 'goals-trash': return this.renderTrash();
+                        case 'journal': return this.renderJournal();
+                        case 'reports': return this.renderReports();
+                        default: return '<div class="text-center p-10">View not found</div>';
+                    }
+                } catch (e) {
+                    console.error("Render Error:", e);
+                    return `<div class="p-8 text-red-600 bg-red-50 rounded-lg border border-red-200">
+                        <h3 class="font-bold">Error rendering view</h3>
+                        <pre class="mt-2 text-sm">${e.message}</pre>
+                    </div>`;
+                }
+            },
+
+            // --- Dashboard ---
+            renderDashboard() {
+                const today = Actions.getTodayStr();
+                const activeGoals = State.goals.filter(g => !g.deleted);
+                const todoTasks = State.tasks.filter(t => t.status === 'todo');
+                
+                const goalStats = activeGoals.map(g => {
+                    const habits = g.habits || [];
+                    const completed = habits.filter(h => h.completedDates?.includes(today)).length;
+                    return { name: g.name, completed, total: habits.length };
+                });
+
+                const statCard = (title, val, sub, color) => `
+                    <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition duration-300">
+                        <div class="text-gray-500 text-xs font-bold uppercase tracking-wider mb-1">${title}</div>
+                        <div class="text-3xl font-bold text-gray-800">${val}</div>
+                        <div class="text-sm ${color} mt-1 font-medium">${sub}</div>
+                    </div>
+                `;
+
+                return `
+                    <div class="fade-in max-w-6xl mx-auto">
+                        <header class="mb-8">
+                            <h1 class="text-3xl font-bold text-gray-800">Overview</h1>
+                            <p class="text-gray-500">${new Date().toLocaleDateString(undefined, {weekday:'long', year:'numeric', month:'long', day:'numeric'})}</p>
+                        </header>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                            ${statCard('Pending Tasks', todoTasks.length, 'In To-Do column', 'text-blue-600')}
+                            ${statCard('Active Goals', activeGoals.length, 'Tracked targets', 'text-purple-600')}
+                            ${statCard('Habit Completions', 
+                                `${goalStats.reduce((a,b)=>a+b.completed,0)}`, 
+                                'Actions done today', 'text-green-600')}
+                        </div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                            <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+                                <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
+                                    <span class="text-green-500">●</span> Today's Habits
+                                </h2>
+                                ${goalStats.filter(g => g.total > 0).length ? 
+                                    `<div class="space-y-5">
+                                        ${goalStats.filter(g => g.total > 0).map(g => `
+                                            <div>
+                                                <div class="flex justify-between text-sm mb-1.5 font-medium">
+                                                    <span class="text-gray-700">${g.name}</span>
+                                                    <span class="text-gray-500">${g.completed}/${g.total}</span>
+                                                </div>
+                                                <div class="w-full bg-gray-100 rounded-full h-2.5 overflow-hidden">
+                                                    <div class="bg-green-500 h-full rounded-full transition-all duration-500" 
+                                                         style="width: ${(g.completed/g.total)*100}%"></div>
+                                                </div>
+                                            </div>
+                                        `).join('')}
+                                    </div>` : 
+                                    '<div class="text-center py-8 text-gray-400 text-sm">No habits scheduled for today.</div>'
+                                }
+                            </div>
+                            
+                            <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+                                <div class="flex justify-between items-center mb-4">
+                                    <h2 class="text-lg font-bold flex items-center gap-2">
+                                        <span class="text-red-500">●</span> High Priority
+                                    </h2>
+                                    <button onclick="Actions.switchView('tasks')" class="text-blue-600 text-xs font-bold hover:underline uppercase tracking-wide">Go to Board</button>
+                                </div>
+                                ${State.tasks.filter(t => t.status !== 'done' && t.priority === 'high').length ? 
+                                    `<div class="space-y-3">
+                                        ${State.tasks.filter(t => t.status !== 'done' && t.priority === 'high').slice(0, 5).map(t => `
+                                            <div class="flex items-center gap-3 p-3 bg-red-50 rounded-lg border border-red-100">
+                                                <div class="w-1.5 h-1.5 rounded-full bg-red-500 flex-shrink-0"></div>
+                                                <span class="font-medium text-gray-800 text-sm truncate">${t.title}</span>
+                                            </div>
+                                        `).join('')}
+                                    </div>` : 
+                                    '<div class="text-center py-8 text-gray-400 text-sm">No high priority tasks pending. Nice work!</div>'
+                                }
+                            </div>
+                        </div>
+                    </div>
+                `;
+            },
+
+            // --- Kanban Board ---
+            renderTaskBoard() {
+                return `
+                    <div class="fade-in h-full flex flex-col">
+                        <div class="flex justify-between items-center mb-6">
+                            <h1 class="text-3xl font-bold text-gray-800">Task Board</h1>
+                            <button onclick="Actions.showModal('task-modal')" 
+                                    class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm transition flex items-center gap-2">
+                                <span>+</span> New Task
+                            </button>
+                        </div>
+                        
+                        <div class="flex-1 overflow-x-auto overflow-y-hidden pb-2">
+                            <div class="flex gap-6 h-full min-w-max">
+                                ${CONSTANTS.TASK_COLUMNS.map(col => this.renderTaskColumn(col)).join('')}
+                            </div>
+                        </div>
+                        
+                        ${this.renderTaskModal()}
+                    </div>
+                `;
+            },
+
+            renderTaskColumn(col) {
+                const tasks = State.tasks
+                    .filter(t => t.status === col.id)
+                    .sort((a, b) => {
+                        const pRank = { high: 0, medium: 1, low: 2 };
+                        if (pRank[a.priority] !== pRank[b.priority]) return pRank[a.priority] - pRank[b.priority];
+                        return (a.dueDate || '9999') > (b.dueDate || '9999') ? 1 : -1;
+                    });
+
+                return `
+                    <div class="w-80 flex flex-col rounded-xl ${col.color} border ${col.border} h-full max-h-full shadow-sm transition-colors duration-200"
+                         ondragover="Actions.handleDragOver(event)"
+                         ondragleave="Actions.handleDragLeave(event)"
+                         ondrop="Actions.dropTask(event, '${col.id}')">
+                        <div class="p-4 border-b border-gray-200/50 flex justify-between items-center">
+                            <h3 class="font-bold text-gray-700 text-sm uppercase tracking-wide">${col.name}</h3>
+                            <span class="bg-white px-2 py-0.5 rounded text-xs font-bold text-gray-500 shadow-sm">${tasks.length}</span>
+                        </div>
+                        <div class="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar">
+                            ${tasks.map(t => this.renderTaskCard(t)).join('')}
+                        </div>
+                    </div>
+                `;
+            },
+
+            renderTaskCard(task) {
+                const priority = CONSTANTS.PRIORITY[task.priority];
+                const today = Actions.getTodayStr();
+                const overdue = task.dueDate && task.dueDate < today && task.status !== 'done';
+
+        return `
+            <div class="bg-white p-4 rounded-lg shadow-sm border border-gray-100 cursor-move hover:shadow-md transition group relative select-none"
+                 draggable="true"
+                 data-task-id="${task.id}"
+                 ondragstart="Actions.dragStart(event)">
+
+                <div class="flex justify-between items-start mb-2">
+                    <span class="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full border ${priority.color}">
+                        ${priority.label}
+                    </span>
+                    <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+                        <button onclick="Actions.openTaskEditor('${task.id}');event.stopPropagation();" class="text-gray-300 hover:text-blue-600 transition p-1 rounded hover:bg-gray-50" title="Edit">✎</button>
+                        <button onclick="Actions.deleteTask('${task.id}');event.stopPropagation();" class="text-gray-300 hover:text-red-500 transition p-1 rounded hover:bg-gray-50" title="Delete">×</button>
+                    </div>
+                </div>
+
+                <p class="font-medium text-gray-800 mb-1 leading-snug text-sm">${task.title}</p>
+                ${task.description ? `<p class="text-xs text-gray-500 mb-2">${task.description}</p>` : ''}
+                ${task.dueDate ? `
+                    <div class="flex items-center gap-1.5 text-xs ${overdue ? 'text-red-600 font-bold' : 'text-gray-500'}">
+                        <span>${overdue ? '⚠️' : '📅'}</span>
+                        ${new Date(task.dueDate + 'T12:00:00').toLocaleDateString()} 
+                    </div>
+                ` : ''}
+            </div>
+        `;
+            },
+
+            renderTaskModal() {
+                const today = Actions.getTodayStr();
+                return `
+                    <div id="task-modal" class="hidden fixed inset-0 bg-gray-900/50 z-50 flex items-center justify-center backdrop-blur-sm transition-opacity">
+                        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 transform transition-all scale-100 m-4">
+                            <h2 id="task-modal-title" class="text-xl font-bold mb-5 text-gray-800">Add New Task</h2>
+                            <form id="task-form" onsubmit="event.preventDefault(); Actions.saveTaskFromForm(this);">
+                                <div class="space-y-4">
+                                    <div>
+                                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">Title</label>
+                                        <input type="text" name="title" required placeholder="What needs to be done?" class="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">Description</label>
+                                        <textarea name="description" rows="3" placeholder="Add more details..." class="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"></textarea>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">Due Date</label>
+                                            <input type="date" name="date" min="${today}" class="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">Priority</label>
+                                            <select name="priority" class="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+                                                <option value="low">Low</option>
+                                                <option value="medium" selected>Medium</option>
+                                                <option value="high">High</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="mt-8 flex gap-3 justify-end border-t pt-5">
+                                    <button type="button" onclick="Actions.hideModal('task-modal');Actions.resetTaskModal();" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg text-sm font-medium transition">Cancel</button>
+                                    <button id="task-modal-submit" type="submit" class="px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium shadow-sm transition">Create Task</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                `;
+            },
+
+            // --- Goals ---
+            renderGoals() {
+                const activeGoals = State.goals.filter(g => !g.deleted);
+                return `
+                    <div class="fade-in max-w-5xl mx-auto">
+                        <div class="flex justify-between items-center mb-8">
+                            <h1 class="text-3xl font-bold text-gray-800">Goals</h1>
+                            <button onclick="Actions.createGoal()" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-medium shadow-sm transition">
+                                + New Goal
+                            </button>
+                        </div>
+                        ${activeGoals.length === 0 ? 
+                            '<div class="text-center py-20 bg-white rounded-xl border border-dashed border-gray-300 text-gray-500">No active goals. Define what matters to you!</div>' : 
+                            activeGoals.map(g => this.renderGoalCard(g)).join('')
+                        }
+                    </div>
+                `;
+            },
+
+            renderGoalCard(goal) {
+                const today = Actions.getTodayStr();
+                const habits = goal.habits || [];
+                const completedToday = habits.filter(h => h.completedDates?.includes(today)).length;
+                const totalHabits = habits.length;
+                const progressPct = totalHabits > 0 ? Math.round((completedToday / totalHabits) * 100) : 0;
+
+                return `
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-6">
+                        <div class="flex justify-between items-start mb-4">
+                            <div>
+                                <h3 class="text-xl font-bold text-gray-800">${goal.name}</h3>
+                                ${goal.description ? `<p class="text-gray-600 mt-1 text-sm">${goal.description}</p>` : ''}
+                                ${goal.targetDate ? `<div class="text-xs text-gray-500 mt-2 font-medium bg-gray-100 inline-block px-2 py-1 rounded">Target: ${new Date(goal.targetDate).toLocaleDateString()}</div>` : ''}
+                            </div>
+                            <div class="flex items-center gap-4">
+                                <div class="text-right">
+                                    <div class="text-2xl font-bold text-blue-600 leading-none">${progressPct}%</div>
+                                    <div class="text-[10px] text-gray-400 uppercase font-bold tracking-wider mt-1">Daily Progress</div>
+                                </div>
+                                <button onclick="Actions.deleteGoal('${goal.id}')" class="text-gray-300 hover:text-red-500 p-2 transition">🗑️</button>
+                            </div>
+                        </div>
+
+                        <div class="w-full bg-gray-100 rounded-full h-1.5 mb-6">
+                            <div class="bg-blue-600 h-1.5 rounded-full transition-all duration-500" style="width: ${progressPct}%"></div>
+                        </div>
+
+                        <div class="bg-gray-50 rounded-lg p-4 border border-gray-100">
+                            <div class="flex justify-between items-center mb-3">
+                                <h4 class="font-bold text-gray-500 text-xs uppercase tracking-wide">Daily Actions</h4>
+                                <button onclick="Actions.addHabit('${goal.id}')" class="text-blue-600 text-xs hover:text-blue-800 font-bold uppercase tracking-wide">+ Add Action</button>
+                            </div>
+                            <div class="space-y-2">
+                                ${habits.length === 0 ? '<div class="text-gray-400 text-xs italic py-1">No actions defined yet.</div>' : 
+                                    habits.map(h => `
+                                        <label class="flex items-center gap-3 bg-white p-2.5 rounded border border-gray-200 cursor-pointer hover:border-blue-300 transition group">
+                                            <input type="checkbox" 
+                                                ${h.completedDates?.includes(today) ? 'checked' : ''} 
+                                                onchange="Actions.toggleHabit('${goal.id}', '${h.id}')"
+                                                class="w-5 h-5 cursor-pointer accent-blue-600 rounded border-gray-300">
+                                            <span class="flex-1 text-sm ${h.completedDates?.includes(today) ? 'line-through text-gray-400' : 'text-gray-700 font-medium'} select-none">${h.name}</span>
+                                            <button onclick="Actions.deleteHabit('${goal.id}', '${h.id}'); event.preventDefault();" class="text-gray-300 hover:text-red-500 px-2 opacity-0 group-hover:opacity-100 transition">×</button>
+                                        </label>
+                                    `).join('')
+                                }
+                            </div>
+                        </div>
+                    </div>
+                `;
+            },
+
+            // --- Calendar ---
+            renderCalendar() {
+                const today = new Date();
+                const year = today.getFullYear();
+                const month = today.getMonth();
+                const firstDay = new Date(year, month, 1).getDay();
+                const daysInMonth = new Date(year, month + 1, 0).getDate();
+                const todayStr = Actions.getTodayStr();
+                
+                // Index tasks
+                const taskMap = {};
+                State.tasks.forEach(t => {
+                    if(t.dueDate) {
+                        if(!taskMap[t.dueDate]) taskMap[t.dueDate] = [];
+                        taskMap[t.dueDate].push(t);
+                    }
+                });
+
+                return `
+                    <div class="fade-in h-full flex flex-col">
+                        <header class="mb-6 flex justify-between items-end">
+                            <h1 class="text-3xl font-bold text-gray-800">${today.toLocaleString('default', { month: 'long', year: 'numeric' })}</h1>
+                            <div class="text-sm text-gray-500">Drag tasks to dates to reschedule</div>
+                        </header>
+                        <div class="flex-1 bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                            <div class="grid grid-cols-7 gap-px bg-gray-200 border border-gray-200 rounded-lg overflow-hidden h-full">
+                                ${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => 
+                                    `<div class="bg-gray-50 p-2 text-center font-bold text-gray-500 text-xs uppercase tracking-wide">${d}</div>`
+                                ).join('')}
+                                
+                                ${Array(firstDay).fill('<div class="bg-gray-50/30"></div>').join('')}
+                                
+                                ${Array.from({length: daysInMonth}, (_, i) => {
+                                    const day = i + 1;
+                                    const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+                                    const dayTasks = taskMap[dateStr] || [];
+                                    const isToday = dateStr === todayStr;
+                                    
+                                    return `
+                                        <div class="bg-white p-2 min-h-[80px] hover:bg-blue-50/50 transition relative group flex flex-col"
+                                             ondragover="Actions.handleDragOver(event)"
+                                             ondragleave="Actions.handleDragLeave(event)"
+                                             ondrop="Actions.dropTaskOnDate(event, '${dateStr}')">
+                                            <span class="text-xs font-bold ${isToday ? 'bg-blue-600 text-white w-6 h-6 flex items-center justify-center rounded-full shadow-sm' : 'text-gray-400 group-hover:text-gray-600'} mb-1">${day}</span>
+                                            <div class="flex-1 space-y-1 overflow-y-auto max-h-[80px] custom-scrollbar">
+                                                ${dayTasks.map(t => `
+                                                    <div class="text-[10px] px-1.5 py-0.5 rounded truncate cursor-move border ${t.status === 'done' ? 'bg-gray-100 text-gray-500 border-gray-200 line-through' : 'bg-blue-50 text-blue-700 border-blue-100'}"
+                                                         draggable="true"
+                                                         data-task-id="${t.id}"
+                                                         ondragstart="Actions.dragStart(event)">
+                                                        ${t.title}
+                                                    </div>
+                                                `).join('')}
+                                            </div>
+                                        </div>
+                                    `;
+                                }).join('')}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            },
+
+            // --- Journal ---
+            renderJournal() {
+                return `
+                    <div class="fade-in max-w-3xl mx-auto">
+                        <div class="flex justify-between items-center mb-8">
+                            <h1 class="text-3xl font-bold text-gray-800">Journal</h1>
+                            <button onclick="Actions.addJournalEntry()" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-medium shadow-sm transition">
+                                + Write Entry
+                            </button>
+                        </div>
+                        <div class="space-y-6">
+                            ${State.journal.length === 0 ? '<div class="text-center text-gray-500 py-10 italic">Write your first thought...</div>' : 
+                                State.journal.sort((a,b) => new Date(b.date) - new Date(a.date)).map(entry => `
+                                    <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 relative group transition hover:shadow-md">
+                                        <button onclick="Actions.deleteJournal('${entry.id}')" class="absolute top-4 right-4 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition p-2">🗑️</button>
+                                        <div class="flex items-center gap-4 mb-4 pb-4 border-b border-gray-100">
+                                            <div class="text-3xl bg-gray-50 w-12 h-12 flex items-center justify-center rounded-full">
+                                                ${entry.mood === 'great' ? '🤩' : entry.mood === 'good' ? '🙂' : entry.mood === 'okay' ? '😐' : '😫'}
+                                            </div>
+                                            <div>
+                                                <div class="font-bold text-gray-800">${new Date(entry.date).toLocaleDateString(undefined, {weekday:'long', year:'numeric', month:'long', day:'numeric'})}</div>
+                                                <div class="text-xs text-gray-500 font-medium">${new Date(entry.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                                            </div>
+                                        </div>
+                                        <div class="text-gray-700 whitespace-pre-wrap leading-relaxed font-serif text-lg">${entry.text}</div>
+                                    </div>
+                                `).join('')
+                            }
+                        </div>
+                    </div>
+                `;
+            },
+            
+            // --- Trash ---
+            renderTrash() {
+                const deleted = State.goals.filter(g => g.deleted);
+                return `
+                    <div class="fade-in max-w-4xl mx-auto">
+                        <h1 class="text-3xl font-bold text-gray-800 mb-8">Trash (Goals)</h1>
+                        ${deleted.length === 0 ? '<div class="text-gray-500 text-center py-10">Trash is empty.</div>' : deleted.map(g => `
+                            <div class="bg-white p-4 rounded-lg shadow-sm border border-gray-100 flex justify-between items-center mb-3">
+                                <div>
+                                    <div class="font-bold text-gray-800">${g.name}</div>
+                                    <div class="text-xs text-red-500 font-medium">Deleted: ${new Date(g.deletedAt).toLocaleDateString()}</div>
+                                </div>
+                                <div class="flex gap-2">
+                                    <button onclick="Actions.restoreGoal('${g.id}')" class="bg-green-50 text-green-700 px-3 py-1.5 rounded text-sm font-medium hover:bg-green-100 transition">Restore</button>
+                                    <button onclick="Actions.permanentDeleteGoal('${g.id}')" class="bg-red-50 text-red-700 px-3 py-1.5 rounded text-sm font-medium hover:bg-red-100 transition">Delete Forever</button>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            },
+
+            // --- Reports ---
+            renderReports() {
+    const today = Actions.getTodayStr();
+    const activeGoals = State.goals.filter(g => !g.deleted);
+    const completedTasks = State.tasks.filter(t => t.status === 'done').length;
+    const pendingTasks = State.tasks.filter(t => t.status !== 'done').length;
+    
+    return `
+        <div class="fade-in max-w-6xl mx-auto pb-12">
+            <header class="mb-8">
+                <h1 class="text-3xl font-bold text-gray-800">Performance Analytics</h1>
+                <p class="text-gray-500">Visual breakdown of your productivity and goal consistency.</p>
+            </header>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                <div class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
+                    <div class="text-xs font-bold text-gray-400 uppercase">Task Ratio</div>
+                    <div class="text-2xl font-bold text-blue-600">${completedTasks} / ${completedTasks + pendingTasks}</div>
+                    <div class="text-[10px] text-gray-500 mt-1">Completed vs Total</div>
+                </div>
+                <div class="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
+                    <div class="text-xs font-bold text-gray-400 uppercase">Active Habits</div>
+                    <div class="text-2xl font-bold text-green-600">${activeGoals.reduce((a, b) => a + (b.habits?.length || 0), 0)}</div>
+                    <div class="text-[10px] text-gray-500 mt-1">Across all goals</div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+                    <h3 class="font-bold text-gray-700 mb-4">Today's Habit Completion</h3>
+                    <div class="h-64 relative">
+                        <canvas id="habitChart"></canvas>
+                    </div>
+                </div>
+
+                <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+                    <h3 class="font-bold text-gray-700 mb-4">Task Priority Mix</h3>
+                    <div class="h-64 relative">
+                        <canvas id="priorityChart"></canvas>
+                    </div>
+                </div>
+
+                <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200 lg:col-span-2">
+                    <h3 class="font-bold text-gray-700 mb-4">Goal Progress (%)</h3>
+                    <div class="h-64 relative">
+                        <canvas id="goalTrendChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+        };
+
+        // ==========================================
+        // 5. ACTIONS (Business Logic & Controllers)
+        // ==========================================
+        const Actions = {
+            async init() {
+                try {
+                    await Storage.init();
+                    await this.loadData();
+                    this.refresh();
+                } catch (e) {
+                    State.errorMessage = "Failed to initialize app: " + e.message;
+                    UI.render();
+                }
+            },
+
+            // --- Helpers ---
+            getTodayStr() {
+                // Returns YYYY-MM-DD in local time
+                const d = new Date();
+                return new Date(d.getTime() - (d.getTimezoneOffset() * 60000))
+                    .toISOString().split('T')[0];
+            },
+
+            clearError() {
+                State.errorMessage = null;
+                this.refresh();
+            },
+
+            async loadData() {
+                const [tasks, goals, journal] = await Promise.all([
+                    Storage.getAll('tasks'),
+                    Storage.getAll('goals'),
+                    Storage.getAll('journal')
+                ]);
+
+                // Normalization
+                State.tasks = tasks.map(this._normalizeTask);
+                State.goals = goals || [];
+                State.journal = journal || [];
+            },
+
+            refresh() {
+                if (State.isRendering) return;
+                State.isRendering = true;
+                
+                requestAnimationFrame(() => {
+                    const app = document.getElementById('app');
+                    app.innerHTML = UI.render();
+                    
+                    // Post-render effects
+                    if (State.currentView === CONSTANTS.VIEWS.REPORTS) {
+                        this.initCharts();
+                    }
+                    
+                    State.isRendering = false;
+                });
+            },
+
+            switchView(view) {
+                State.currentView = view;
+                this.refresh();
+            },
+
+            showModal(id) { 
+                const el = document.getElementById(id);
+                if(el) el.classList.remove('hidden'); 
+            },
+            hideModal(id) { 
+                const el = document.getElementById(id);
+                if(el) el.classList.add('hidden'); 
+            },
+
+            // --- Task Logic ---
+            _normalizeTask(raw) {
+                return {
+                    id: raw.id,
+                    title: raw.title || 'Untitled',
+                    // Optional longer description of the task
+                    description: raw.description || '',
+                    status: ['todo', 'in-progress', 'done'].includes(raw.status) ? raw.status : 'todo',
+                    priority: ['low', 'medium', 'high'].includes(raw.priority) ? raw.priority : 'medium',
+                    dueDate: raw.dueDate || null,
+                    createdAt: raw.createdAt || new Date().toISOString(),
+                    updatedAt: raw.updatedAt || new Date().toISOString()
+                };
+            },
+
+            /**
+             * Reset the task modal to its default (add) state, clearing fields and removing editId
+             */
+            resetTaskModal() {
+                const titleEl = document.getElementById('task-modal-title');
+                const submitEl = document.getElementById('task-modal-submit');
+                const form = document.getElementById('task-form');
+                if (!form) return;
+                delete form.dataset.editId;
+                if (titleEl) titleEl.textContent = 'Add New Task';
+                if (submitEl) submitEl.textContent = 'Create Task';
+                form.title.value = '';
+                if (form.description) form.description.value = '';
+                form.date.value = '';
+                form.priority.value = 'medium';
+            },
+
+            /**
+             * Open the task modal pre-filled with an existing task for editing
+             */
+            openTaskEditor(id) {
+                const task = State.tasks.find(t => t.id === id);
+                if (!task) return;
+                const titleEl = document.getElementById('task-modal-title');
+                const submitEl = document.getElementById('task-modal-submit');
+                const form = document.getElementById('task-form');
+                this.showModal('task-modal');
+                if (titleEl) titleEl.textContent = 'Edit Task';
+                if (submitEl) submitEl.textContent = 'Save Changes';
+                if (form) {
+                    form.dataset.editId = id;
+                    form.title.value = task.title || '';
+                    if (form.description) form.description.value = task.description || '';
+                    form.date.value = task.dueDate || '';
+                    form.priority.value = task.priority || 'medium';
+                }
+            },
+
+            /**
+             * Save a task from the modal. Determines whether to add or update based on dataset.editId
+             */
+            async saveTaskFromForm(form) {
+                const title = form.title.value.trim();
+                if (!title) return;
+                const editId = form.dataset.editId;
+                if (editId) {
+                    const task = State.tasks.find(t => t.id === editId);
+                    if (!task) return;
+                    task.title = title;
+                    task.description = form.description.value.trim();
+                    task.priority = form.priority.value;
+                    task.dueDate = form.date.value || null;
+                    task.updatedAt = new Date().toISOString();
+                    await Storage.update('tasks', task);
+                    if (window.saveTaskToFirestore) await window.saveTaskToFirestore(task);
+                } else {
+                    const task = this._normalizeTask({
+                        id: crypto.randomUUID(),
+                        title: title,
+                        description: form.description.value.trim(),
+                        priority: form.priority.value,
+                        dueDate: form.date.value || null,
+                        status: 'todo',
+                        createdAt: new Date().toISOString()
+                    });
+                    await Storage.add('tasks', task);
+                    State.tasks.push(task);
+                    if (window.saveTaskToFirestore) await window.saveTaskToFirestore(task);
+                }
+                this.hideModal('task-modal');
+                this.resetTaskModal();
+                this.refresh();
+            },
+
+            async addTaskFromForm(form) {
+                const title = form.title.value.trim();
+                if (!title) return;
+
+                const task = this._normalizeTask({
+                    id: crypto.randomUUID(),
+                    title: title,
+                    priority: form.priority.value,
+                    dueDate: form.date.value || null,
+                    status: 'todo',
+                    createdAt: new Date().toISOString()
+                });
+
+                await Storage.add('tasks', task);
+                State.tasks.push(task);
+                this.hideModal('task-modal');
+                this.refresh();
+            },
+
+            async deleteTask(id) {
+                if (!confirm('Delete this task?')) return;
+                await Storage.delete('tasks', id);
+                State.tasks = State.tasks.filter(t => t.id !== id);
+                this.refresh();
+            },
+
+            // --- Drag & Drop ---
+            dragStart(e) { 
+                e.dataTransfer.setData('taskId', e.target.dataset.taskId);
+                e.dataTransfer.effectAllowed = 'move';
+            },
+            
+            handleDragOver(e) { 
+                e.preventDefault(); 
+                e.dataTransfer.dropEffect = 'move';
+                e.currentTarget.classList.add('drag-over');
+            },
+            
+            handleDragLeave(e) {
+                e.currentTarget.classList.remove('drag-over');
+            },
+
+            async dropTask(e, newStatus) {
+                e.preventDefault();
+                e.currentTarget.classList.remove('drag-over');
+                
+                const id = e.dataTransfer.getData('taskId');
+                const task = State.tasks.find(t => t.id === id);
+                if (!task || task.status === newStatus) return;
+
+                task.status = newStatus;
+                task.updatedAt = new Date().toISOString();
+                
+                await Storage.update('tasks', task);
+                this.refresh();
+            },
+
+            async dropTaskOnDate(e, dateStr) {
+                e.preventDefault();
+                e.currentTarget.classList.remove('drag-over');
+                
+                const id = e.dataTransfer.getData('taskId');
+                const task = State.tasks.find(t => t.id === id);
+                if (!task) return;
+
+                // If dates are different, update
+                if (task.dueDate !== dateStr) {
+                    task.dueDate = dateStr;
+                    task.updatedAt = new Date().toISOString();
+                    await Storage.update('tasks', task);
+                    this.refresh();
+                }
+            },
+
+            // --- Goal Logic ---
+            async createGoal() {
+                const name = prompt("Enter goal name:");
+                if (!name || !name.trim()) return;
+                
+                const goal = {
+                    id: crypto.randomUUID(),
+                    name: name.trim(),
+                    description: '',
+                    habits: [],
+                    deleted: false,
+                    createdAt: new Date().toISOString()
+                };
+
+                await Storage.add('goals', goal);
+                State.goals.push(goal);
+                this.refresh();
+            },
+
+            async deleteGoal(id) {
+                const goal = State.goals.find(g => g.id === id);
+                if (confirm(`Move "${goal.name}" to trash?`)) {
+                    goal.deleted = true;
+                    goal.deletedAt = new Date().toISOString();
+                    await Storage.update('goals', goal);
+                    this.refresh();
+                }
+            },
+            
+            async permanentDeleteGoal(id) {
+                if (confirm("Permanently delete this goal? This cannot be undone.")) {
+                    await Storage.delete('goals', id);
+                    State.goals = State.goals.filter(g => g.id !== id);
+                    this.refresh();
+                }
+            },
+
+            async restoreGoal(id) {
+                const goal = State.goals.find(g => g.id === id);
+                goal.deleted = false;
+                delete goal.deletedAt;
+                await Storage.update('goals', goal);
+                this.refresh();
+            },
+
+            async addHabit(goalId) {
+                const name = prompt("Enter daily action name:");
+                if (!name || !name.trim()) return;
+
+                const goal = State.goals.find(g => g.id === goalId);
+                goal.habits.push({
+                    id: crypto.randomUUID(),
+                    name: name.trim(),
+                    completedDates: []
+                });
+                
+                goal.updatedAt = new Date().toISOString();
+                await Storage.update('goals', goal);
+                this.refresh();
+            },
+
+            async toggleHabit(goalId, habitId) {
+                const goal = State.goals.find(g => g.id === goalId);
+                const habit = goal.habits.find(h => h.id === habitId);
+                const today = this.getTodayStr();
+                
+                if (!habit.completedDates) habit.completedDates = [];
+                const idx = habit.completedDates.indexOf(today);
+                
+                if (idx > -1) habit.completedDates.splice(idx, 1);
+                else habit.completedDates.push(today);
+
+                goal.updatedAt = new Date().toISOString();
+                await Storage.update('goals', goal);
+                this.refresh();
+            },
+            
+            async deleteHabit(goalId, habitId) {
+                if(!confirm("Remove this action?")) return;
+                const goal = State.goals.find(g => g.id === goalId);
+                goal.habits = goal.habits.filter(h => h.id !== habitId);
+                goal.updatedAt = new Date().toISOString();
+                await Storage.update('goals', goal);
+                this.refresh();
+            },
+
+            // --- Journal ---
+            async addJournalEntry() {
+                const text = prompt("Write your entry:");
+                if (!text || !text.trim()) return;
+                
+                const entry = {
+                    id: crypto.randomUUID(),
+                    text: text.trim(),
+                    mood: 'good',
+                    date: new Date().toISOString()
+                };
+
+                await Storage.add('journal', entry);
+                State.journal.push(entry);
+                this.refresh();
+            },
+
+            async deleteJournal(id) {
+                if (!confirm("Delete this entry?")) return;
+                await Storage.delete('journal', id);
+                State.journal = State.journal.filter(j => j.id !== id);
+                this.refresh();
+            },
+
+            // --- Data Mgmt ---
+            async exportData() {
+                const data = { 
+                    tasks: State.tasks, 
+                    goals: State.goals, 
+                    journal: State.journal,
+                    exportedAt: new Date().toISOString(),
+                    version: 2
+                };
+                const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `planner-backup-${this.getTodayStr()}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            },
+
+            async importData(e) {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                const reader = new FileReader();
+                reader.onload = async (ev) => {
+                    try {
+                        const data = JSON.parse(ev.target.result);
+                        if (!confirm("This will overwrite your current data. Are you sure?")) return;
+                        
+                        await Storage.clear('tasks');
+                        await Storage.clear('goals');
+                        await Storage.clear('journal');
+                        
+                        // Defensive loading
+                        for (const t of data.tasks || []) await Storage.add('tasks', t);
+                        for (const g of data.goals || []) await Storage.add('goals', g);
+                        for (const j of data.journal || []) await Storage.add('journal', j);
+                        
+                        location.reload();
+                    } catch (err) {
+                        alert("Import failed: " + err.message);
+                    }
+                };
+                reader.readAsText(file);
+            },
+
+            // --- Charts ---
+            initCharts() {
+    // 1. Habit Completion Doughnut
+    const habitCtx = document.getElementById('habitChart');
+    if (!habitCtx) return;
+    
+    const activeGoals = State.goals.filter(g => !g.deleted);
+    const today = Actions.getTodayStr();
+    
+    let done = 0, missed = 0;
+    activeGoals.forEach(g => {
+        g.habits.forEach(h => {
+            if (h.completedDates?.includes(today)) done++;
+            else missed++;
+        });
+    });
+
+    new Chart(habitCtx, {
+        type: 'doughnut',
+        data: {
+            labels: ['Completed', 'Pending'],
+            datasets: [{
+                data: [done, missed],
+                backgroundColor: ['#10b981', '#f3f4f6'],
+                borderWidth: 0
+            }]
+        },
+        options: { cutout: '70%', maintainAspectRatio: false }
+    });
+
+    // 2. Priority Distribution Polar Area
+    const prioCtx = document.getElementById('priorityChart');
+    if (!prioCtx) return;
+    
+    const prioData = {
+        high: State.tasks.filter(t => t.priority === 'high').length,
+        medium: State.tasks.filter(t => t.priority === 'medium').length,
+        low: State.tasks.filter(t => t.priority === 'low').length
+    };
+
+    new Chart(prioCtx, {
+        type: 'polarArea',
+        data: {
+            labels: ['High', 'Medium', 'Low'],
+            datasets: [{
+                data: [prioData.high, prioData.medium, prioData.low],
+                backgroundColor: ['#ef444499', '#f59e0b99', '#3b82f699']
+            }]
+        },
+        options: { maintainAspectRatio: false }
+    });
+
+    // 3. Goal Progress Bar Chart
+    const goalCtx = document.getElementById('goalTrendChart');
+    if (!goalCtx) return;
+    
+    new Chart(goalCtx, {
+        type: 'bar',
+        data: {
+            labels: activeGoals.map(g => g.name),
+            datasets: [{
+                label: 'Progress %',
+                data: activeGoals.map(g => {
+                    if (!g.habits.length) return 0;
+                    const d = g.habits.filter(h => h.completedDates?.includes(today)).length;
+                    return Math.round((d / g.habits.length) * 100);
+                }),
+                backgroundColor: '#3b82f6',
+                borderRadius: 8
+            }]
+        },
+        options: { 
+            maintainAspectRatio: false,
+            scales: { y: { beginAtZero: true, max: 100 } }
+        }
+    });
+}
+        };
+
+        // ==========================================
+        // 6. BOOTSTRAP
+        // ==========================================
+        window.Actions = Actions;
+        document.addEventListener('DOMContentLoaded', () => Actions.init());
+
+    </script>
+
+    <!-- Firebase and Firestore integration (Google login and sync) -->
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.9.0/firebase-app.js';
+        import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.9.0/firebase-auth.js';
+        import { getFirestore, enableIndexedDbPersistence, collection, query, where, getDocs, doc, setDoc } from 'https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js';
+
+        // TODO: Replace with your own Firebase project configuration
+        // Configuração real do seu projeto Firebase
+        const firebaseConfig = {
+        apiKey: "AIzaSyC2ZwTQwTP6w-OfyH2U6jYCw_ULrqGsJu4",
+        authDomain: "planner-28848511-588c9.firebaseapp.com",
+        projectId: "planner-28848511-588c9",
+        storageBucket: "planner-28848511-588c9.firebasestorage.app",
+        messagingSenderId: "710896904766",
+        appId: "1:710896904766:web:64d6cca17eba34c5ad7f6f"
+        };
+
+        const firebaseApp = initializeApp(firebaseConfig);
+        const auth = getAuth(firebaseApp);
+        const db = getFirestore(firebaseApp);
+
+        // Enable offline persistence for Firestore (cached data)
+        enableIndexedDbPersistence(db).catch((err) => {
+            console.error('Firestore persistence error', err);
+        });
+
+        // Update the auth UI depending on user state
+        function updateAuthUI(user) {
+            const authControls = document.getElementById('auth-controls');
+            if (!authControls) return;
+            if (user) {
+                authControls.innerHTML = `<span class="mr-2 text-sm">Olá, ${user.displayName || user.email}</span><button onclick=\"logout()\" class=\"px-3 py-1 text-sm bg-gray-200 rounded\">Sair</button>`;
+            } else {
+                authControls.innerHTML = `<button onclick=\"loginWithGoogle()\" class=\"px-3 py-1 text-sm bg-blue-600 text-white rounded\">Entrar com Google</button>`;
+            }
+        }
+
+        // Expose login and logout methods on window
+        window.loginWithGoogle = async function () {
+            const provider = new GoogleAuthProvider();
+            try {
+                await signInWithPopup(auth, provider);
+            } catch (error) {
+                console.error('Login error', error);
+            }
+        };
+        window.logout = async function () {
+            try {
+                await signOut(auth);
+            } catch (error) {
+                console.error('Logout error', error);
+            }
+        };
+
+        // Synchronize tasks from Firestore to IndexedDB/local state on login
+        async function syncDownTasks(user) {
+            const q = query(collection(db, 'tasks'), where('userId', '==', user.uid));
+            const querySnapshot = await getDocs(q);
+            State.tasks = [];
+            for (const docSnap of querySnapshot.docs) {
+                const data = docSnap.data();
+                // Save in local IndexedDB (update or add)
+                await Storage.update('tasks', data).catch(() => Storage.add('tasks', data));
+                State.tasks.push(data);
+            }
+            Actions.refresh();
+        }
+
+        // Save a task to Firestore with the current user ID
+        window.saveTaskToFirestore = async function (task) {
+            if (!State.user) return;
+            const taskWithUser = { ...task, userId: State.user.uid };
+            try {
+                await setDoc(doc(db, 'tasks', task.id), taskWithUser, { merge: true });
+            } catch (err) {
+                console.error('Failed to save to Firestore', err);
+            }
+        };
+
+        // Listen for authentication state changes
+        onAuthStateChanged(auth, async (user) => {
+            State.user = user;
+            updateAuthUI(user);
+            if (user) {
+                await syncDownTasks(user);
+            }
+        });
+    </script>
+</body>
+</html>
