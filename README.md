@@ -1,2 +1,3 @@
-# planner
+# planner-pwa
+
 Planner
