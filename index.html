@@ -23,6 +23,8 @@
     </style>
 </head>
 <body class="bg-gray-50 text-gray-800 font-sans">
+    <!-- Authentication controls will render login/logout buttons -->
+    <div id="auth-controls" class="flex justify-end p-2 space-x-2"></div>
     <div id="app"></div>
 
     <script>
@@ -63,6 +65,8 @@
             tasks: [],
             goals: [],
             journal: [],
+            // Authenticated user (null when not logged in)
+            user: null,
             // UI State
             errorMessage: null,
             activeChart: null
@@ -322,40 +326,33 @@
                 const priority = CONSTANTS.PRIORITY[task.priority];
                 const today = Actions.getTodayStr();
                 const overdue = task.dueDate && task.dueDate < today && task.status !== 'done';
-                // Each task card supports drag & drop, editing and deleting. If a description exists
-                // we render it in a smaller font below the title.
-                return `
-                    <div class="bg-white p-4 rounded-lg shadow-sm border border-gray-100 cursor-move hover:shadow-md transition group relative select-none"
-                         draggable="true"
-                         data-task-id="${task.id}"
-                         ondragstart="Actions.dragStart(event)"
-                         ondblclick="Actions.openTaskEditor('${task.id}')">
 
-                        <div class="flex justify-between items-start mb-2">
-                            <span class="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full border ${priority.color}">
-                                ${priority.label}
-                            </span>
-                            <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
-                                <button onclick="Actions.openTaskEditor('${task.id}');event.stopPropagation();"
-                                        class="text-gray-300 hover:text-blue-600 transition p-1 rounded hover:bg-gray-50"
-                                        title="Edit">✎</button>
-                                <button onclick="Actions.deleteTask('${task.id}');event.stopPropagation();"
-                                        class="text-gray-300 hover:text-red-500 transition p-1 rounded hover:bg-gray-50"
-                                        title="Delete">×</button>
-                            </div>
-                        </div>
+        return `
+            <div class="bg-white p-4 rounded-lg shadow-sm border border-gray-100 cursor-move hover:shadow-md transition group relative select-none"
+                 draggable="true"
+                 data-task-id="${task.id}"
+                 ondragstart="Actions.dragStart(event)">
 
-                        <p class="font-medium text-gray-800 mb-1 leading-snug text-sm">${task.title}</p>
-                        ${task.description ? `<p class="text-gray-600 text-xs mb-2 whitespace-pre-line line-clamp-2">${task.description}</p>` : ''}
-
-                        ${task.dueDate ? `
-                            <div class="flex items-center gap-1.5 text-xs ${overdue ? 'text-red-600 font-bold' : 'text-gray-500'}">
-                                <span>${overdue ? '⚠️' : '📅'}</span>
-                                ${new Date(task.dueDate + 'T12:00:00').toLocaleDateString()}
-                            </div>
-                        ` : ''}
+                <div class="flex justify-between items-start mb-2">
+                    <span class="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full border ${priority.color}">
+                        ${priority.label}
+                    </span>
+                    <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+                        <button onclick="Actions.openTaskEditor('${task.id}');event.stopPropagation();" class="text-gray-300 hover:text-blue-600 transition p-1 rounded hover:bg-gray-50" title="Edit">✎</button>
+                        <button onclick="Actions.deleteTask('${task.id}');event.stopPropagation();" class="text-gray-300 hover:text-red-500 transition p-1 rounded hover:bg-gray-50" title="Delete">×</button>
                     </div>
-                `;
+                </div>
+
+                <p class="font-medium text-gray-800 mb-1 leading-snug text-sm">${task.title}</p>
+                ${task.description ? `<p class="text-xs text-gray-500 mb-2">${task.description}</p>` : ''}
+                ${task.dueDate ? `
+                    <div class="flex items-center gap-1.5 text-xs ${overdue ? 'text-red-600 font-bold' : 'text-gray-500'}">
+                        <span>${overdue ? '⚠️' : '📅'}</span>
+                        ${new Date(task.dueDate + 'T12:00:00').toLocaleDateString()} 
+                    </div>
+                ` : ''}
+            </div>
+        `;
             },
 
             renderTaskModal() {
@@ -519,8 +516,7 @@
                                                     <div class="text-[10px] px-1.5 py-0.5 rounded truncate cursor-move border ${t.status === 'done' ? 'bg-gray-100 text-gray-500 border-gray-200 line-through' : 'bg-blue-50 text-blue-700 border-blue-100'}"
                                                          draggable="true"
                                                          data-task-id="${t.id}"
-                                                         ondragstart="Actions.dragStart(event)"
-                                                         onclick="Actions.openTaskEditor('${t.id}');event.stopPropagation();">
+                                                         ondragstart="Actions.dragStart(event)">
                                                         ${t.title}
                                                     </div>
                                                 `).join('')}
@@ -720,39 +716,18 @@
                 return {
                     id: raw.id,
                     title: raw.title || 'Untitled',
+                    // Optional longer description of the task
+                    description: raw.description || '',
                     status: ['todo', 'in-progress', 'done'].includes(raw.status) ? raw.status : 'todo',
                     priority: ['low', 'medium', 'high'].includes(raw.priority) ? raw.priority : 'medium',
                     dueDate: raw.dueDate || null,
                     createdAt: raw.createdAt || new Date().toISOString(),
-                    updatedAt: raw.updatedAt || new Date().toISOString(),
-                    // Preserve a description field when loading tasks, defaulting to empty string.
-                    description: raw.description || ''
+                    updatedAt: raw.updatedAt || new Date().toISOString()
                 };
             },
 
-            async addTaskFromForm(form) {
-                const title = form.title.value.trim();
-                if (!title) return;
-
-                const task = this._normalizeTask({
-                    id: crypto.randomUUID(),
-                    title: title,
-                    priority: form.priority.value,
-                    dueDate: form.date.value || null,
-                    description: form.description ? form.description.value.trim() : '',
-                    status: 'todo',
-                    createdAt: new Date().toISOString()
-                });
-
-                await Storage.add('tasks', task);
-                State.tasks.push(task);
-                this.hideModal('task-modal');
-                this.refresh();
-            },
-
             /**
-             * Resets the task modal back to its initial "create" state.
-             * Clears any edit id, resets form fields and button labels.
+             * Reset the task modal to its default (add) state, clearing fields and removing editId
              */
             resetTaskModal() {
                 const titleEl = document.getElementById('task-modal-title');
@@ -769,9 +744,7 @@
             },
 
             /**
-             * Opens the task modal to edit an existing task. Pre-fills the form
-             * with the task's current values.
-             * @param {string} id The task id to edit.
+             * Open the task modal pre-filled with an existing task for editing
              */
             openTaskEditor(id) {
                 const task = State.tasks.find(t => t.id === id);
@@ -792,40 +765,57 @@
             },
 
             /**
-             * Saves a task from the modal form. If an editId is present on the form
-             * dataset then the existing task is updated; otherwise a new task is created.
-             * After saving the modal is hidden and the form reset.
+             * Save a task from the modal. Determines whether to add or update based on dataset.editId
              */
             async saveTaskFromForm(form) {
                 const title = form.title.value.trim();
                 if (!title) return;
                 const editId = form.dataset.editId;
                 if (editId) {
-                    // update existing
                     const task = State.tasks.find(t => t.id === editId);
                     if (!task) return;
                     task.title = title;
-                    task.description = form.description ? form.description.value.trim() : '';
+                    task.description = form.description.value.trim();
                     task.priority = form.priority.value;
                     task.dueDate = form.date.value || null;
                     task.updatedAt = new Date().toISOString();
                     await Storage.update('tasks', task);
+                    if (window.saveTaskToFirestore) await window.saveTaskToFirestore(task);
                 } else {
-                    // create new
                     const task = this._normalizeTask({
                         id: crypto.randomUUID(),
                         title: title,
+                        description: form.description.value.trim(),
                         priority: form.priority.value,
                         dueDate: form.date.value || null,
-                        description: form.description ? form.description.value.trim() : '',
                         status: 'todo',
                         createdAt: new Date().toISOString()
                     });
                     await Storage.add('tasks', task);
                     State.tasks.push(task);
+                    if (window.saveTaskToFirestore) await window.saveTaskToFirestore(task);
                 }
                 this.hideModal('task-modal');
                 this.resetTaskModal();
+                this.refresh();
+            },
+
+            async addTaskFromForm(form) {
+                const title = form.title.value.trim();
+                if (!title) return;
+
+                const task = this._normalizeTask({
+                    id: crypto.randomUUID(),
+                    title: title,
+                    priority: form.priority.value,
+                    dueDate: form.date.value || null,
+                    status: 'todo',
+                    createdAt: new Date().toISOString()
+                });
+
+                await Storage.add('tasks', task);
+                State.tasks.push(task);
+                this.hideModal('task-modal');
                 this.refresh();
             },
 
@@ -1124,6 +1114,94 @@
         window.Actions = Actions;
         document.addEventListener('DOMContentLoaded', () => Actions.init());
 
+    </script>
+
+    <!-- Firebase and Firestore integration (Google login and sync) -->
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.9.0/firebase-app.js';
+        import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.9.0/firebase-auth.js';
+        import { getFirestore, enableIndexedDbPersistence, collection, query, where, getDocs, doc, setDoc } from 'https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js';
+
+        // TODO: Replace with your own Firebase project configuration
+        const firebaseConfig = {
+            apiKey: 'YOUR_API_KEY',
+            authDomain: 'YOUR_AUTH_DOMAIN',
+            projectId: 'YOUR_PROJECT_ID',
+            storageBucket: 'YOUR_STORAGE_BUCKET',
+            messagingSenderId: 'YOUR_SENDER_ID',
+            appId: 'YOUR_APP_ID'
+        };
+
+        const firebaseApp = initializeApp(firebaseConfig);
+        const auth = getAuth(firebaseApp);
+        const db = getFirestore(firebaseApp);
+
+        // Enable offline persistence for Firestore (cached data)
+        enableIndexedDbPersistence(db).catch((err) => {
+            console.error('Firestore persistence error', err);
+        });
+
+        // Update the auth UI depending on user state
+        function updateAuthUI(user) {
+            const authControls = document.getElementById('auth-controls');
+            if (!authControls) return;
+            if (user) {
+                authControls.innerHTML = `<span class="mr-2 text-sm">Olá, ${user.displayName || user.email}</span><button onclick=\"logout()\" class=\"px-3 py-1 text-sm bg-gray-200 rounded\">Sair</button>`;
+            } else {
+                authControls.innerHTML = `<button onclick=\"loginWithGoogle()\" class=\"px-3 py-1 text-sm bg-blue-600 text-white rounded\">Entrar com Google</button>`;
+            }
+        }
+
+        // Expose login and logout methods on window
+        window.loginWithGoogle = async function () {
+            const provider = new GoogleAuthProvider();
+            try {
+                await signInWithPopup(auth, provider);
+            } catch (error) {
+                console.error('Login error', error);
+            }
+        };
+        window.logout = async function () {
+            try {
+                await signOut(auth);
+            } catch (error) {
+                console.error('Logout error', error);
+            }
+        };
+
+        // Synchronize tasks from Firestore to IndexedDB/local state on login
+        async function syncDownTasks(user) {
+            const q = query(collection(db, 'tasks'), where('userId', '==', user.uid));
+            const querySnapshot = await getDocs(q);
+            State.tasks = [];
+            for (const docSnap of querySnapshot.docs) {
+                const data = docSnap.data();
+                // Save in local IndexedDB (update or add)
+                await Storage.update('tasks', data).catch(() => Storage.add('tasks', data));
+                State.tasks.push(data);
+            }
+            Actions.refresh();
+        }
+
+        // Save a task to Firestore with the current user ID
+        window.saveTaskToFirestore = async function (task) {
+            if (!State.user) return;
+            const taskWithUser = { ...task, userId: State.user.uid };
+            try {
+                await setDoc(doc(db, 'tasks', task.id), taskWithUser, { merge: true });
+            } catch (err) {
+                console.error('Failed to save to Firestore', err);
+            }
+        };
+
+        // Listen for authentication state changes
+        onAuthStateChanged(auth, async (user) => {
+            State.user = user;
+            updateAuthUI(user);
+            if (user) {
+                await syncDownTasks(user);
+            }
+        });
     </script>
 </body>
 </html>
